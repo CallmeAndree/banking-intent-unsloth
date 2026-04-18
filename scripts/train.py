@@ -159,8 +159,7 @@ def prepare_dataset(df: pd.DataFrame) -> Dataset:
 # ------------------------------------------------------------------
 def main():
     from unsloth import FastLanguageModel
-    from trl import SFTTrainer
-    from transformers import TrainingArguments
+    from trl import SFTTrainer, SFTConfig
 
     # Runtime detection: must run here (not at import time) so it reads the
     # actual GPU on the execution platform (Kaggle T4, Colab A100, etc.)
@@ -201,9 +200,17 @@ def main():
     eval_dataset  = prepare_dataset(test_df)
     print(f"Train samples: {len(train_dataset)} | Eval samples: {len(eval_dataset)}")
 
-    # 4-D: Training arguments
-    training_args = TrainingArguments(
+    # 4-D: SFTConfig = TrainingArguments + SFT-specific params (TRL >= 0.12)
+    training_args = SFTConfig(
         output_dir=CONFIG["output_dir"],
+
+        # ── SFT-specific params (must be in SFTConfig, not SFTTrainer) ──
+        dataset_text_field="text",
+        max_seq_length=CONFIG["max_seq_length"],
+        dataset_num_proc=2,
+        packing=False,                  # disable packing for classification prompts
+
+        # ── Training ────────────────────────────────────────────────
         per_device_train_batch_size=CONFIG["per_device_train_batch_size"],
         gradient_accumulation_steps=CONFIG["gradient_accumulation_steps"],
         num_train_epochs=CONFIG["num_train_epochs"],
@@ -224,22 +231,18 @@ def main():
         eval_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        optim="adamw_8bit",             # memory-efficient optimizer
+        optim="adamw_8bit",
         seed=CONFIG["seed"],
-        report_to="none",               # set "wandb" to enable W&B logging
+        report_to="none",
         dataloader_num_workers=2,
     )
 
-    # 4-E: SFTTrainer (Supervised Fine-Tuning)
+    # 4-E: SFTTrainer — SFT params are now in SFTConfig, not here
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        dataset_text_field="text",
-        max_seq_length=CONFIG["max_seq_length"],
-        dataset_num_proc=2,
-        packing=False,                  # disable packing for classification prompts
         args=training_args,
     )
 
