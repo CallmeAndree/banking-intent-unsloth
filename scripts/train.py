@@ -206,7 +206,7 @@ def main():
         bf16=CONFIG["bf16"],
         logging_steps=CONFIG["logging_steps"],
         save_strategy=CONFIG["save_strategy"],
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         optim="adamw_8bit",             # memory-efficient optimizer
