@@ -29,10 +29,6 @@ import pandas as pd
 import torch
 from datasets import Dataset
 
-# Auto-detect bf16 support (Ampere+ only); fall back to fp16 on T4 / older GPUs
-_BF16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-_FP16 = torch.cuda.is_available() and not _BF16
-
 # ------------------------------------------------------------------
 # Step 1: Configuration — Edit paths and hyperparameters here
 # ------------------------------------------------------------------
@@ -70,8 +66,8 @@ CONFIG = {
     "lr_scheduler_type": "cosine",
     "warmup_ratio": 0.05,              # used to compute warmup_steps at runtime
     "weight_decay": 0.01,               # L2 regularization
-    "fp16": _FP16,                        # True on T4/older GPUs (no bf16 support)
-    "bf16": _BF16,                        # True on Ampere+ (A100, RTX 30xx, etc.)
+    "fp16": False,                        # overridden at runtime inside main()
+    "bf16": False,                        # overridden at runtime inside main()
     "logging_steps": 50,
     "save_strategy": "epoch",
     "seed": 42,
@@ -165,6 +161,14 @@ def main():
     from unsloth import FastLanguageModel
     from trl import SFTTrainer
     from transformers import TrainingArguments
+
+    # Runtime detection: must run here (not at import time) so it reads the
+    # actual GPU on the execution platform (Kaggle T4, Colab A100, etc.)
+    bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    fp16_ok = torch.cuda.is_available() and not bf16_ok
+    CONFIG["bf16"] = bf16_ok
+    CONFIG["fp16"] = fp16_ok
+    print(f"Precision: {'bf16' if bf16_ok else 'fp16' if fp16_ok else 'cpu'}")
 
     # 4-A: Load model with Unsloth 4-bit quantization
     print("Loading model...")
