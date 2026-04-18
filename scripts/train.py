@@ -26,7 +26,12 @@
 
 import os
 import pandas as pd
+import torch
 from datasets import Dataset
+
+# Auto-detect bf16 support (Ampere+ only); fall back to fp16 on T4 / older GPUs
+_BF16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+_FP16 = torch.cuda.is_available() and not _BF16
 
 # ------------------------------------------------------------------
 # Step 1: Configuration — Edit paths and hyperparameters here
@@ -63,10 +68,10 @@ CONFIG = {
     "num_train_epochs": 3,
     "learning_rate": 2e-4,
     "lr_scheduler_type": "cosine",
-    "warmup_ratio": 0.05,
+    "warmup_ratio": 0.05,              # used to compute warmup_steps at runtime
     "weight_decay": 0.01,               # L2 regularization
-    "fp16": False,                       # set True if GPU does not support bf16
-    "bf16": True,
+    "fp16": _FP16,                        # True on T4/older GPUs (no bf16 support)
+    "bf16": _BF16,                        # True on Ampere+ (A100, RTX 30xx, etc.)
     "logging_steps": 50,
     "save_strategy": "epoch",
     "seed": 42,
@@ -200,7 +205,13 @@ def main():
         num_train_epochs=CONFIG["num_train_epochs"],
         learning_rate=CONFIG["learning_rate"],
         lr_scheduler_type=CONFIG["lr_scheduler_type"],
-        warmup_ratio=CONFIG["warmup_ratio"],
+        warmup_steps=int(
+            len(train_dataset)
+            / CONFIG["per_device_train_batch_size"]
+            / CONFIG["gradient_accumulation_steps"]
+            * CONFIG["num_train_epochs"]
+            * CONFIG["warmup_ratio"]
+        ),
         weight_decay=CONFIG["weight_decay"],
         fp16=CONFIG["fp16"],
         bf16=CONFIG["bf16"],
