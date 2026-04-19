@@ -19,10 +19,20 @@ from __future__ import annotations
 
 import argparse
 import os
+import warnings
 
 import pandas as pd
 import torch
 import yaml
+
+# Suppress FutureWarning spam from transformers.modeling_attn_mask_utils
+# (deprecated API, harmless, but floods Kaggle logs).
+warnings.filterwarnings(
+    "ignore",
+    message=".*AttentionMaskConverter.*",
+    category=FutureWarning,
+    module="transformers",
+)
 
 
 # ------------------------------------------------------------------
@@ -146,7 +156,12 @@ class IntentClassification:
         labels: list[str] = []
         for output in outputs:
             decoded = self._tokenizer.decode(output, skip_special_tokens=True)
-            label = decoded.split("Intent:")[-1].strip().split()[0]
+            # Guard: model may produce empty / whitespace output for padded
+            # sequences in a batch. Fall back to "unknown" instead of crashing.
+            parts = decoded.split("Intent:")
+            after_intent = parts[-1].strip() if len(parts) > 1 else ""
+            tokens = after_intent.split()
+            label = tokens[0] if tokens else "unknown"
             labels.append(label)
         return labels
 
