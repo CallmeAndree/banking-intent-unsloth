@@ -83,6 +83,17 @@ class IntentClassification:
             load_in_4bit=True,
         )
         FastLanguageModel.for_inference(self._model)
+
+        # Fix: Qwen2.5 generation_config ships with max_length=32768 which
+        # conflicts with max_new_tokens and floods logs with warnings.
+        # Clearing it makes max_new_tokens the single authoritative limit.
+        self._model.generation_config.max_length = None
+
+        # Left-padding is required for correct batched causal LM generation.
+        self._tokenizer.padding_side = "left"
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         print("Model ready for inference.")
 
@@ -103,10 +114,26 @@ class IntentClassification:
             message: Raw customer query string.
 
         Returns:
-            Predicted intent label as a string (e.g. ``"lost_or_stolen_card"``).
+            Predicted intent label as a string (e.g. ``"lost_or_stolen_card"``). 
         """
-        prompt = self._build_prompt(message)
-        inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+        return self._batch_predict([message])[0]
+
+    def _batch_predict(self, messages: list[str]) -> list[str]:
+        """Run batched generation for a list of messages in a single GPU call.
+
+        Args:
+            messages: List of raw customer query strings.
+
+        Returns:
+            List of predicted intent label strings, one per input message.
+        """
+        prompts = [self._build_prompt(m) for m in messages]
+        inputs = self._tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        ).to(self._device)
 
         with torch.no_grad():
             outputs = self._model.generate(
@@ -116,10 +143,12 @@ class IntentClassification:
                 do_sample=self._do_sample,
             )
 
-        decoded = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # The model appends the label right after "Intent:"
-        predicted_label = decoded.split("Intent:")[-1].strip().split()[0]
-        return predicted_label
+        labels: list[str] = []
+        for output in outputs:
+            decoded = self._tokenizer.decode(output, skip_special_tokens=True)
+            label = decoded.split("Intent:")[-1].strip().split()[0]
+            labels.append(label)
+        return labels
 
 
 # ------------------------------------------------------------------
@@ -143,14 +172,13 @@ def run_batch_inference(cfg: dict) -> None:
     # Initialise the classifier (loads model once)
     clf = IntentClassification(config_file)
 
-    # Predict in batches (progress-friendly for Kaggle)
+    # Predict in true batches: one GPU generate() call per batch
     predictions: list[str] = []
     total = len(test_df)
     for start in range(0, total, batch_size):
         end = min(start + batch_size, total)
         batch = test_df["text"].iloc[start:end].tolist()
-        for text in batch:
-            predictions.append(clf(text))
+        predictions.extend(clf._batch_predict(batch))
         print(f"  Processed {end}/{total} samples...")
 
     # Attach predictions and persist
