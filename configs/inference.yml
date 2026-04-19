@@ -1,0 +1,27 @@
+# =============================================================
+# Inference Configuration for Banking Intent Classification
+# Model: Qwen/Qwen2.5-3B (fine-tuned LoRA) | Framework: Unsloth
+#
+# The model_checkpoint_path below is the value consumed by
+# IntentClassification.__init__(model_path) via this config file.
+# Override MODEL_CHECKPOINT, TEST_DATA_PATH, OUTPUT_PATH via
+# environment variables when running on Kaggle.
+# =============================================================
+
+# ── Model ────────────────────────────────────────────────────
+# Path to the LoRA fine-tuned checkpoint saved after training.
+# On Kaggle: set MODEL_CHECKPOINT env var to override.
+model_checkpoint_path: "./checkpoints/qwen2.5-banking77/final_checkpoint"
+
+# ── Input / Output ───────────────────────────────────────────
+test_data_path: "./sample_data/test.csv"
+output_path: "./results/predictions.csv"
+
+# ── Generation parameters ────────────────────────────────────
+max_seq_length: 256
+max_new_tokens: 20    # intent labels are short (1 token typically)
+temperature: 0.1
+do_sample: false
+
+# ── Performance ──────────────────────────────────────────────
+batch_size: 32        # number of samples to process per iteration

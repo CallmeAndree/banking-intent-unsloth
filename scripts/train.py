@@ -2,76 +2,75 @@
 # Fine-tuning Qwen/Qwen2.5-3B with Unsloth
 # Platform: Google Colab / Kaggle
 # Task: Banking Intent Classification (banking77)
-# ============================================================
 #
-# HYPERPARAMETERS:
-# - max_seq_length     : 256     (max token length per sample)
-# - per_device_train_batch_size : 16
-# - gradient_accumulation_steps: 4  (effective batch = 64)
-# - learning_rate      : 2e-4
-# - num_train_epochs   : 3
-# - optimizer          : adamw_8bit (memory-efficient)
-# - lr_scheduler_type  : cosine
-# - warmup_ratio       : 0.05
-# - weight_decay       : 0.01    (L2 regularization)
-# - LoRA r             : 16
-# - LoRA alpha         : 16
-# - LoRA dropout       : 0.05    (regularization)
+# Usage:
+#   python scripts/train.py                          # uses configs/train.yml
+#   python scripts/train.py --config /path/to/cfg.yml
+#   DATA_DIR=/data OUTPUT_DIR=/out python scripts/train.py
 # ============================================================
 
-# ------------------------------------------------------------------
-# Step 0: Install dependencies (run this cell first on Colab/Kaggle)
-# ------------------------------------------------------------------
-# !pip install unsloth datasets pandas -q
-
+import argparse
 import os
+
 import pandas as pd
 import torch
+import yaml
 from datasets import Dataset
 
+
 # ------------------------------------------------------------------
-# Step 1: Configuration — Edit paths and hyperparameters here
+# Step 0: CLI argument parsing
 # ------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _default_config = os.path.normpath(
+        os.path.join(_script_dir, "..", "configs", "train.yml")
+    )
+    parser = argparse.ArgumentParser(
+        description="Fine-tune Qwen2.5-3B for banking intent classification."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=_default_config,
+        help="Path to YAML config file (default: configs/train.yml)",
+    )
+    return parser.parse_args()
 
-# Resolve sample_data relative to this script: scripts/ → .. → sample_data/
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_DATA_DIR = os.path.join(_SCRIPT_DIR, "..", "sample_data")
-_DEFAULT_OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "..", "checkpoints", "qwen2.5-banking77")
 
-CONFIG = {
-    # ── Paths ──────────────────────────────────────────────────────
-    # Automatically resolved to <repo_root>/sample_data on any platform.
-    # Override here if running on Colab/Kaggle with a different upload path.
-    "data_dir": os.environ.get("DATA_DIR", _DEFAULT_DATA_DIR),
-    "output_dir": os.environ.get("OUTPUT_DIR", _DEFAULT_OUTPUT_DIR),
+# ------------------------------------------------------------------
+# Step 1: Load configuration from YAML
+# ------------------------------------------------------------------
+def load_config(config_path: str) -> dict:
+    """Load training config from a YAML file.
 
-    # ── Model ──────────────────────────────────────────────────────
-    "model_name": "Qwen/Qwen2.5-3B",
-    "max_seq_length": 256,
+    Environment variables DATA_DIR and OUTPUT_DIR override the
+    values defined under paths: in the YAML, allowing easy
+    override from train.sh or the shell.
+    """
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
 
-    # ── LoRA ───────────────────────────────────────────────────────
-    "lora_r": 16,
-    "lora_alpha": 16,
-    "lora_dropout": 0.05,
-    "lora_target_modules": [
-        "q_proj", "k_proj", "v_proj",
-        "o_proj", "gate_proj", "up_proj", "down_proj",
-    ],
+    # Resolve relative paths against the project root (one level up from scripts/)
+    _project_root = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    )
 
-    # ── Training ───────────────────────────────────────────────────
-    "per_device_train_batch_size": 16,
-    "gradient_accumulation_steps": 4,   # effective batch = 64
-    "num_train_epochs": 3,
-    "learning_rate": 2e-4,
-    "lr_scheduler_type": "cosine",
-    "warmup_ratio": 0.05,              # used to compute warmup_steps at runtime
-    "weight_decay": 0.01,               # L2 regularization
-    "fp16": False,                        # overridden at runtime inside main()
-    "bf16": False,                        # overridden at runtime inside main()
-    "logging_steps": 50,
-    "save_strategy": "epoch",
-    "seed": 42,
-}
+    def _resolve(path: str) -> str:
+        """Make relative paths absolute from the project root."""
+        if not os.path.isabs(path):
+            return os.path.normpath(os.path.join(_project_root, path))
+        return path
+
+    cfg["paths"]["data_dir"] = os.environ.get(
+        "DATA_DIR", _resolve(cfg["paths"]["data_dir"])
+    )
+    cfg["paths"]["output_dir"] = os.environ.get(
+        "OUTPUT_DIR", _resolve(cfg["paths"]["output_dir"])
+    )
+
+    return cfg
+
 
 # ------------------------------------------------------------------
 # Step 2: Label mapping (77 banking intents)
@@ -109,15 +108,16 @@ id2label = {
 label2id = {v: k for k, v in id2label.items()}
 NUM_LABELS = len(id2label)
 
+
 # ------------------------------------------------------------------
 # Step 3: Load and prepare data
 # ------------------------------------------------------------------
 def load_data(data_dir: str):
     train_path = os.path.join(data_dir, "train.csv")
-    test_path  = os.path.join(data_dir, "test.csv")
+    test_path = os.path.join(data_dir, "test.csv")
 
     train_df = pd.read_csv(train_path)
-    test_df  = pd.read_csv(test_path)
+    test_df = pd.read_csv(test_path)
 
     # Ensure label_name column exists
     if "label_name" not in train_df.columns:
@@ -129,8 +129,8 @@ def load_data(data_dir: str):
 
 
 def format_prompt(text: str, label_name: str | None = None) -> str:
-    """
-    Format each sample into an instruction-following prompt.
+    """Format each sample into an instruction-following prompt.
+
     During training, the response (label) is included.
     During inference, omit label_name.
     """
@@ -146,98 +146,107 @@ def format_prompt(text: str, label_name: str | None = None) -> str:
 
 
 def prepare_dataset(df: pd.DataFrame) -> Dataset:
-    records = []
-    for _, row in df.iterrows():
-        records.append({
-            "text": format_prompt(str(row["text"]), str(row["label_name"])),
-        })
+    records = [
+        {"text": format_prompt(str(row["text"]), str(row["label_name"]))}
+        for _, row in df.iterrows()
+    ]
     return Dataset.from_list(records)
 
 
 # ------------------------------------------------------------------
 # Step 4: Main training entry point
 # ------------------------------------------------------------------
-def main():
+def main(cfg: dict) -> None:
     from unsloth import FastLanguageModel
     from trl import SFTTrainer, SFTConfig
 
-    # Runtime detection: must run here (not at import time) so it reads the
-    # actual GPU on the execution platform (Kaggle T4, Colab A100, etc.)
+    paths = cfg["paths"]
+    model_cfg = cfg["model"]
+    lora_cfg = cfg["lora"]
+    train_cfg = cfg["training"]
+    sft_cfg = cfg["sft"]
+    log_cfg = cfg["logging"]
+    out_cfg = cfg["output"]
+
+    # Runtime detection: must run here so it reads the actual GPU
+    # on the execution platform (Kaggle T4, Colab A100, etc.)
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     fp16_ok = torch.cuda.is_available() and not bf16_ok
-    CONFIG["bf16"] = bf16_ok
-    CONFIG["fp16"] = fp16_ok
     print(f"Precision: {'bf16' if bf16_ok else 'fp16' if fp16_ok else 'cpu'}")
 
     # 4-A: Load model with Unsloth 4-bit quantization
     print("Loading model...")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=CONFIG["model_name"],
-        max_seq_length=CONFIG["max_seq_length"],
-        dtype=None,         # auto-detect (bf16 if supported)
-        load_in_4bit=True,  # 4-bit quantization to reduce VRAM usage
+        model_name=model_cfg["name"],
+        max_seq_length=model_cfg["max_seq_length"],
+        dtype=model_cfg["dtype"],           # null in YAML → None in Python
+        load_in_4bit=model_cfg["load_in_4bit"],
     )
 
     # 4-B: Apply LoRA adapters (PEFT)
     model = FastLanguageModel.get_peft_model(
         model,
-        r=CONFIG["lora_r"],
-        target_modules=CONFIG["lora_target_modules"],
-        lora_alpha=CONFIG["lora_alpha"],
-        lora_dropout=CONFIG["lora_dropout"],
-        bias="none",
-        use_gradient_checkpointing="unsloth",  # saves memory on long contexts
-        random_state=CONFIG["seed"],
-        use_rslora=False,
+        r=lora_cfg["r"],
+        target_modules=lora_cfg["target_modules"],
+        lora_alpha=lora_cfg["alpha"],
+        lora_dropout=lora_cfg["dropout"],
+        bias=lora_cfg["bias"],
+        use_gradient_checkpointing=lora_cfg["use_gradient_checkpointing"],
+        random_state=train_cfg["seed"],
+        use_rslora=lora_cfg["use_rslora"],
         loftq_config=None,
     )
     model.print_trainable_parameters()
 
     # 4-C: Prepare datasets
     print("Loading data...")
-    train_df, test_df = load_data(CONFIG["data_dir"])
+    train_df, test_df = load_data(paths["data_dir"])
     train_dataset = prepare_dataset(train_df)
-    eval_dataset  = prepare_dataset(test_df)
+    eval_dataset = prepare_dataset(test_df)
     print(f"Train samples: {len(train_dataset)} | Eval samples: {len(eval_dataset)}")
 
     # 4-D: SFTConfig = TrainingArguments + SFT-specific params (TRL >= 0.12)
-    training_args = SFTConfig(
-        output_dir=CONFIG["output_dir"],
-
-        # ── SFT-specific params (must be in SFTConfig, not SFTTrainer) ──
-        dataset_text_field="text",
-        max_seq_length=CONFIG["max_seq_length"],
-        dataset_num_proc=2,
-        packing=False,                  # disable packing for classification prompts
-
-        # ── Training ────────────────────────────────────────────────
-        per_device_train_batch_size=CONFIG["per_device_train_batch_size"],
-        gradient_accumulation_steps=CONFIG["gradient_accumulation_steps"],
-        num_train_epochs=CONFIG["num_train_epochs"],
-        learning_rate=CONFIG["learning_rate"],
-        lr_scheduler_type=CONFIG["lr_scheduler_type"],
-        warmup_steps=int(
-            len(train_dataset)
-            / CONFIG["per_device_train_batch_size"]
-            / CONFIG["gradient_accumulation_steps"]
-            * CONFIG["num_train_epochs"]
-            * CONFIG["warmup_ratio"]
-        ),
-        weight_decay=CONFIG["weight_decay"],
-        fp16=CONFIG["fp16"],
-        bf16=CONFIG["bf16"],
-        logging_steps=CONFIG["logging_steps"],
-        save_strategy=CONFIG["save_strategy"],
-        eval_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        optim="adamw_8bit",
-        seed=CONFIG["seed"],
-        report_to="none",
-        dataloader_num_workers=2,
+    warmup_steps = int(
+        len(train_dataset)
+        / train_cfg["per_device_train_batch_size"]
+        / train_cfg["gradient_accumulation_steps"]
+        * train_cfg["num_train_epochs"]
+        * train_cfg["warmup_ratio"]
     )
 
-    # 4-E: SFTTrainer — SFT params are now in SFTConfig, not here
+    training_args = SFTConfig(
+        output_dir=paths["output_dir"],
+
+        # ── SFT-specific params ──────────────────────────────────────
+        dataset_text_field=sft_cfg["dataset_text_field"],
+        max_seq_length=model_cfg["max_seq_length"],
+        dataset_num_proc=train_cfg["dataloader_num_workers"],
+        packing=sft_cfg["packing"],
+
+        # ── Training ────────────────────────────────────────────────
+        per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
+        gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
+        num_train_epochs=train_cfg["num_train_epochs"],
+        learning_rate=train_cfg["learning_rate"],
+        lr_scheduler_type=train_cfg["lr_scheduler_type"],
+        warmup_steps=warmup_steps,
+        weight_decay=train_cfg["weight_decay"],
+        fp16=fp16_ok,
+        bf16=bf16_ok,
+        optim=train_cfg["optimizer"],
+        seed=train_cfg["seed"],
+        dataloader_num_workers=train_cfg["dataloader_num_workers"],
+
+        # ── Logging & Checkpointing ─────────────────────────────────
+        logging_steps=log_cfg["logging_steps"],
+        save_strategy=log_cfg["save_strategy"],
+        eval_strategy=log_cfg["eval_strategy"],
+        load_best_model_at_end=log_cfg["load_best_model_at_end"],
+        metric_for_best_model=log_cfg["metric_for_best_model"],
+        report_to=log_cfg["report_to"],
+    )
+
+    # 4-E: SFTTrainer
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -252,17 +261,17 @@ def main():
     print(f"Training complete. Stats: {trainer_stats}")
 
     # 4-G: Save final checkpoint (LoRA adapters + tokenizer)
-    final_checkpoint = os.path.join(CONFIG["output_dir"], "final_checkpoint")
+    final_checkpoint = os.path.join(
+        paths["output_dir"], out_cfg["final_checkpoint_subdir"]
+    )
     model.save_pretrained(final_checkpoint)
     tokenizer.save_pretrained(final_checkpoint)
     print(f"Model checkpoint saved to: {final_checkpoint}")
 
-    # 4-H: (Optional) Save merged 16-bit model for inference
-    merged_dir = os.path.join(CONFIG["output_dir"], "merged_16bit")
+    # 4-H: Save merged 16-bit model for inference
+    merged_dir = os.path.join(paths["output_dir"], out_cfg["merged_16bit_subdir"])
     model.save_pretrained_merged(merged_dir, tokenizer, save_method="merged_16bit")
     print(f"Merged 16-bit model saved to: {merged_dir}")
-
-    return trainer_stats
 
 
 # ------------------------------------------------------------------
@@ -289,4 +298,7 @@ def predict(model, tokenizer, query: str) -> str:
 
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    print(f"Loading config from: {args.config}")
+    cfg = load_config(args.config)
+    main(cfg)

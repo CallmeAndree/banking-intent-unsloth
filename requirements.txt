@@ -1,2 +1,5 @@
+unsloth
 datasets
 pandas
+pyyaml
+trl

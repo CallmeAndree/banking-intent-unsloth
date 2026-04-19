@@ -1,0 +1,67 @@
+# =============================================================
+# Training Configuration for Banking Intent Classification
+# Model: Qwen/Qwen2.5-3B | Framework: Unsloth + TRL (SFT)
+# =============================================================
+
+# ── Paths ────────────────────────────────────────────────────
+# Relative paths are resolved from the project root.
+# Override via environment variables: DATA_DIR, OUTPUT_DIR
+paths:
+  data_dir: "./sample_data"
+  output_dir: "./checkpoints/qwen2.5-banking77"
+
+# ── Model ────────────────────────────────────────────────────
+model:
+  name: "Qwen/Qwen2.5-3B"
+  max_seq_length: 256
+  load_in_4bit: true         # 4-bit quantization to reduce VRAM usage
+  dtype: null                # null = auto-detect (bf16 if GPU supports it)
+
+# ── LoRA (PEFT) ──────────────────────────────────────────────
+lora:
+  r: 16
+  alpha: 16
+  dropout: 0.05
+  bias: "none"
+  use_rslora: false
+  use_gradient_checkpointing: "unsloth"  # Unsloth memory-saving mode
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# ── Training ─────────────────────────────────────────────────
+training:
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 4   # effective batch size = 64
+  num_train_epochs: 3
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05               # fraction of total steps used for warmup
+  weight_decay: 0.01               # L2 regularization
+  optimizer: "adamw_8bit"
+  seed: 42
+  dataloader_num_workers: 2
+
+# ── SFT-specific ─────────────────────────────────────────────
+sft:
+  dataset_text_field: "text"
+  packing: false                   # disabled for classification prompts
+
+# ── Logging & Checkpointing ──────────────────────────────────
+logging:
+  logging_steps: 50
+  save_strategy: "epoch"           # save one checkpoint per epoch
+  eval_strategy: "epoch"
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  report_to: "none"                # set "wandb" or "tensorboard" if needed
+
+# ── Output Artifacts ─────────────────────────────────────────
+output:
+  final_checkpoint_subdir: "final_checkpoint"   # LoRA adapters + tokenizer
+  merged_16bit_subdir: "merged_16bit"           # Base model merged with LoRA
